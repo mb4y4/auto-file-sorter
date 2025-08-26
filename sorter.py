@@ -1,90 +1,81 @@
 import os
+import sys
 import time
+import shutil
 import logging
 from logging.handlers import RotatingFileHandler
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
-from dotenv import load_dotenv
 
-# Load configuration from .env
+# ---- Fallback fix for Windows/Pylance not resolving python-dotenv ----
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    sys.path.append(
+        os.path.expanduser("~\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages")
+    )
+    from dotenv import load_dotenv
+
+# Load environment variables
 load_dotenv()
 
-WATCH_DIR = os.getenv("WATCH_DIR", os.path.expanduser("~/Downloads"))
-LOG_DIR = os.getenv("LOG_DIR", "logs")
+# --- Logging setup with rotation ---
+log_handler = RotatingFileHandler(
+    "file_sorter.log", maxBytes=1_000_000, backupCount=5
+)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[log_handler]
+)
 
-# Ensure log directory exists
-os.makedirs(LOG_DIR, exist_ok=True)
+# --- Get configuration from .env ---
+WATCH_DIR = os.getenv("WATCH_DIR", "./watch_folder")
+SORTED_DIR = os.getenv("SORTED_DIR", "./sorted_folder")
 
-# Setup logging with rotation (5 logs, 1MB each)
-log_file = os.path.join(LOG_DIR, "file_sorter.log")
-logger = logging.getLogger("FileSorter")
-logger.setLevel(logging.INFO)
-
-handler = RotatingFileHandler(log_file, maxBytes=1_000_000, backupCount=5)
-formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-handler.setFormatter(formatter)
-
-# Avoid duplicate handlers when script restarts
-if not logger.handlers:
-    logger.addHandler(handler)
-
-# File categories based on extension
+# File type mapping
 FILE_TYPES = {
-    "Images": [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff"],
-    "Documents": [".pdf", ".doc", ".docx", ".txt", ".xls", ".xlsx", ".ppt", ".pptx"],
-    "Audio": [".mp3", ".wav", ".aac", ".flac"],
-    "Videos": [".mp4", ".avi", ".mov", ".mkv"],
-    "Archives": [".zip", ".rar", ".tar", ".gz", ".7z"],
-    "Scripts": [".py", ".js", ".sh", ".bat", ".java", ".cpp", ".go"],
+    "images": [".jpg", ".jpeg", ".png", ".gif"],
+    "documents": [".pdf", ".docx", ".txt"],
+    "videos": [".mp4", ".mov", ".avi"],
+    "archives": [".zip", ".rar", ".tar", ".gz"],
 }
 
-class FileSorterHandler(FileSystemEventHandler):
-    def on_created(self, event):
-        if not event.is_directory:
-            self.sort_file(event.src_path)
 
-    def sort_file(self, file_path):
-        file_ext = os.path.splitext(file_path)[1].lower()
-        moved = False
+def create_folders():
+    """Ensure target folders exist for each category"""
+    for folder in FILE_TYPES.keys():
+        os.makedirs(os.path.join(SORTED_DIR, folder), exist_ok=True)
 
-        for category, extensions in FILE_TYPES.items():
-            if file_ext in extensions:
-                category_path = os.path.join(WATCH_DIR, category)
-                os.makedirs(category_path, exist_ok=True)
-                new_path = os.path.join(category_path, os.path.basename(file_path))
-                
-                try:
-                    os.rename(file_path, new_path)
-                    logger.info(f"Moved: {file_path} -> {new_path}")
-                except Exception as e:
-                    logger.error(f"Error moving {file_path}: {e}")
-                moved = True
-                break
 
-        if not moved:
-            other_path = os.path.join(WATCH_DIR, "Others")
-            os.makedirs(other_path, exist_ok=True)
-            new_path = os.path.join(other_path, os.path.basename(file_path))
-            try:
-                os.rename(file_path, new_path)
-                logger.info(f"Moved: {file_path} -> {new_path}")
-            except Exception as e:
-                logger.error(f"Error moving {file_path}: {e}")
+def sort_files():
+    """Move files into categorized folders"""
+    for filename in os.listdir(WATCH_DIR):
+        file_path = os.path.join(WATCH_DIR, filename)
+        if os.path.isfile(file_path):
+            moved = False
+            for folder, extensions in FILE_TYPES.items():
+                if any(filename.lower().endswith(ext) for ext in extensions):
+                    dest = os.path.join(SORTED_DIR, folder, filename)
+                    shutil.move(file_path, dest)
+                    logging.info(f"Moved {filename} → {folder}")
+                    moved = True
+                    break
+            if not moved:
+                dest = os.path.join(SORTED_DIR, "others")
+                os.makedirs(dest, exist_ok=True)
+                shutil.move(file_path, os.path.join(dest, filename))
+                logging.info(f"Moved {filename} → others")
 
-def start_sorting():
-    logger.info(f"🚀 Auto File Sorter started on {WATCH_DIR}")
-    event_handler = FileSorterHandler()
-    observer = Observer()
-    observer.schedule(event_handler, WATCH_DIR, recursive=False)
-    observer.start()
 
+def main():
+    create_folders()
+    logging.info("Started monitoring...")
     try:
         while True:
-            time.sleep(1)
+            sort_files()
+            time.sleep(5)  # check every 5 seconds
     except KeyboardInterrupt:
-        observer.stop()
-        logger.info("🛑 File Sorter stopped manually")
-    observer.join()
+        logging.info("Stopped by user.")
+
 
 if __name__ == "__main__":
-    start_sorting()
+    main()
